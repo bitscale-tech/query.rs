@@ -12,11 +12,13 @@ An AI client for the terminal.
 #### // TODO: 
 
 - {✓}~~**Fix aarch64 Builds** *by switching `aws-lc-rs` with `ring` and `rustls-tls-native-roots` with `rustls-tls-webpki-roots`*~~
-- { }**Model removing**
-- { }**Model renaming**
-- { }**Mouse scroll support in Chat**
+- {✓}~~**Model removing**~~
+- {✓}~~**Model renaming**~~
+- {✓}~~**Mouse scroll support in Chat**~~
+- { }**Config files**
 - { }**MCP access**
-- { }**Config file**
+- { }**Add more providers**
+- { }**Revamped chat UI**
 
 ## Installation
 
@@ -45,6 +47,8 @@ Run the binary:
 - `/model <provider> <name> <api_key> [base_url]` - Add a new model.
   - Providers: `openai`, `gemini`, `groq`, `ollama`
 - `/switch <model_name>` - Switch to a different model.
+- `/remove <model_name>` - Remove a model from config.
+- `/rename <old_name> <new_name>` - Rename an existing model.
 - `/clear` - Clear chat history.
 - `/help` - Show help message.
 - `ESC` - Exit.
@@ -52,11 +56,12 @@ Run the binary:
 ### Interaction
 
 - **Sidebar**: Click a model name to switch models.
+- **Chat**: Use Mouse Wheel to scroll history.
 
 ### Keybindings
 
 - `Enter`: Send message
-- `Up/Down/PgUp/PgDn`: Scroll chat history
+- `Up/Down/PgUp/PgDn`: Scroll chat history (also supports mouse wheel)
 - `Left/Right/Home/End`: Navigate input cursor
 - `Delete/Backspace`: Edit text
 

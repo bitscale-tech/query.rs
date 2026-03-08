@@ -28,6 +28,7 @@ struct App {
     chat_scroll: u16,
     cursor_pos: usize,
     show_help: bool,
+    help_scroll: u16,
 }
 
 impl App {
@@ -42,6 +43,7 @@ impl App {
             chat_scroll: 0,
             cursor_pos: 0,
             show_help: false,
+            help_scroll: 0,
         })
     }
 
@@ -84,6 +86,47 @@ impl App {
                 }
             } else {
                 self.status_message = "Usage: /switch <model_name>".to_string();
+            }
+        } else if self.input.starts_with("/remove") {
+            let parts: Vec<&str> = self.input.split_whitespace().collect();
+            if parts.len() >= 2 {
+                let name = parts[1].to_string();
+                if self.config.models.remove(&name).is_some() {
+                    if self.config.current_model.as_ref() == Some(&name) {
+                        self.config.current_model = self.config.models.keys().next().cloned();
+                    }
+                    if let Err(e) = self.config.save() {
+                        self.status_message = format!("Error saving config: {}", e);
+                    } else {
+                        self.status_message = format!("Model {} removed.", name);
+                    }
+                } else {
+                    self.status_message = format!("Model {} not found.", name);
+                }
+            } else {
+                self.status_message = "Usage: /remove <model_name>".to_string();
+            }
+        } else if self.input.starts_with("/rename") {
+            let parts: Vec<&str> = self.input.split_whitespace().collect();
+            if parts.len() >= 3 {
+                let old_name = parts[1].to_string();
+                let new_name = parts[2].to_string();
+                if let Some(mut model_config) = self.config.models.remove(&old_name) {
+                    model_config.name = new_name.clone();
+                    self.config.models.insert(new_name.clone(), model_config);
+                    if self.config.current_model.as_ref() == Some(&old_name) {
+                        self.config.current_model = Some(new_name.clone());
+                    }
+                    if let Err(e) = self.config.save() {
+                        self.status_message = format!("Error saving config: {}", e);
+                    } else {
+                        self.status_message = format!("Model {} renamed to {}.", old_name, new_name);
+                    }
+                } else {
+                    self.status_message = format!("Model {} not found.", old_name);
+                }
+            } else {
+                self.status_message = "Usage: /rename <old_name> <new_name>".to_string();
             }
         } else if self.input == "/help" {
             self.show_help = true;
@@ -201,16 +244,32 @@ where
                                 app.cursor_pos = app.input.len();
                             }
                             KeyCode::Up => {
-                                app.chat_scroll = app.chat_scroll.saturating_add(1);
+                                if app.show_help {
+                                    app.help_scroll = app.help_scroll.saturating_add(1);
+                                } else {
+                                    app.chat_scroll = app.chat_scroll.saturating_add(1);
+                                }
                             }
                             KeyCode::Down => {
-                                app.chat_scroll = app.chat_scroll.saturating_sub(1);
+                                if app.show_help {
+                                    app.help_scroll = app.help_scroll.saturating_sub(1);
+                                } else {
+                                    app.chat_scroll = app.chat_scroll.saturating_sub(1);
+                                }
                             }
                             KeyCode::PageUp => {
-                                app.chat_scroll = app.chat_scroll.saturating_add(10);
+                                if app.show_help {
+                                    app.help_scroll = app.help_scroll.saturating_add(10);
+                                } else {
+                                    app.chat_scroll = app.chat_scroll.saturating_add(10);
+                                }
                             }
                             KeyCode::PageDown => {
-                                app.chat_scroll = app.chat_scroll.saturating_sub(10);
+                                if app.show_help {
+                                    app.help_scroll = app.help_scroll.saturating_sub(10);
+                                } else {
+                                    app.chat_scroll = app.chat_scroll.saturating_sub(10);
+                                }
                             }
                             KeyCode::Char(c) => {
                                 app.input.insert(app.cursor_pos, c);
@@ -240,37 +299,64 @@ where
                         }
                     }
                     Event::Mouse(mouse) => {
-                        if let event::MouseEventKind::Down(event::MouseButton::Left) = mouse.kind {
-                            let size = terminal.size()?;
-                            let main_chunks = Layout::default()
-                                .direction(Direction::Vertical)
-                                .constraints([
-                                    Constraint::Length(3),
-                                    Constraint::Min(0),
-                                    Constraint::Length(3),
-                                    Constraint::Length(1),
-                                ].as_ref())
-                                .split(size.into());
-                            
-                            let body_chunks = Layout::default()
-                                .direction(Direction::Horizontal)
-                                .constraints([Constraint::Percentage(20), Constraint::Percentage(80)].as_ref())
-                                .split(main_chunks[1]);
-                            
-                            let sidebar = body_chunks[0];
-                            if mouse.column > sidebar.x && mouse.column < sidebar.x + sidebar.width - 1
-                                && mouse.row > sidebar.y && mouse.row < sidebar.y + sidebar.height - 1 
-                            {
-                                let clicked_row = (mouse.row - sidebar.y - 1) as usize;
-                                let mut model_names: Vec<&String> = app.config.models.keys().collect();
-                                model_names.sort();
-                                
-                                if let Some(&name) = model_names.get(clicked_row) {
-                                    app.config.current_model = Some(name.clone());
-                                    app.status_message = format!("Switched to model: {}", name);
-                                    app.chat_scroll = 0;
+                        let size = terminal.size()?;
+                        let main_chunks = Layout::default()
+                            .direction(Direction::Vertical)
+                            .constraints([
+                                Constraint::Length(3),
+                                Constraint::Min(0),
+                                Constraint::Length(3),
+                                Constraint::Length(1),
+                            ].as_ref())
+                            .split(size.into());
+                        
+                        let body_chunks = Layout::default()
+                            .direction(Direction::Horizontal)
+                            .constraints([Constraint::Percentage(20), Constraint::Percentage(80)].as_ref())
+                            .split(main_chunks[1]);
+                        
+                        let sidebar = body_chunks[0];
+                        let chat_area = body_chunks[1];
+
+                        match mouse.kind {
+                            event::MouseEventKind::Down(event::MouseButton::Left) => {
+                                if mouse.column > sidebar.x && mouse.column < sidebar.x + sidebar.width - 1
+                                    && mouse.row > sidebar.y && mouse.row < sidebar.y + sidebar.height - 1 
+                                {
+                                    let clicked_row = (mouse.row - sidebar.y - 1) as usize;
+                                    let mut model_names: Vec<&String> = app.config.models.keys().collect();
+                                    model_names.sort();
+                                    
+                                    if let Some(&name) = model_names.get(clicked_row) {
+                                        app.config.current_model = Some(name.clone());
+                                        app.status_message = format!("Switched to model: {}", name);
+                                        app.chat_scroll = 0;
+                                    }
                                 }
                             }
+                            event::MouseEventKind::ScrollUp => {
+                                if mouse.column > chat_area.x && mouse.column < chat_area.x + chat_area.width - 1
+                                    && mouse.row > chat_area.y && mouse.row < chat_area.y + chat_area.height - 1 
+                                {
+                                    if app.show_help {
+                                        app.help_scroll = app.help_scroll.saturating_add(3);
+                                    } else {
+                                        app.chat_scroll = app.chat_scroll.saturating_add(3);
+                                    }
+                                }
+                            }
+                            event::MouseEventKind::ScrollDown => {
+                                if mouse.column > chat_area.x && mouse.column < chat_area.x + chat_area.width - 1
+                                    && mouse.row > chat_area.y && mouse.row < chat_area.y + chat_area.height - 1 
+                                {
+                                    if app.show_help {
+                                        app.help_scroll = app.help_scroll.saturating_sub(3);
+                                    } else {
+                                        app.chat_scroll = app.chat_scroll.saturating_sub(3);
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                     _ => {}
@@ -349,11 +435,23 @@ fn ui(f: &mut Frame, app: &App) {
     // Chat history or Help
     let chat_area = body_chunks[1];
     if app.show_help {
-        let help_text = "### Commands\n\n- `/model <provider> <name> <api_key> [base_url]` - Add a new model.\n  - Providers: `openai`, `gemini`, `groq`, `ollama` \n- `/switch <model_name>` - Switch to another model.\n- `/clear` - Clear chat history.\n- `/help` - Show help message.\n- `ESC` - Exit.\n\n### Keybindings\n\n- `Enter`: Send message\n- `Up/Down/PgUp/PgDn`: Scroll chat history\n- `Left/Right/Home/End`: Navigate input cursor\n- `Delete/Backspace`: Edit text\n\n### Interaction\n\n- **Sidebar**: Click on a model name to switch models.\n\n## Configuration\n\nConfig is stored in `~/.config/query.rs/config.json`.";
+        let help_text = "### Commands\n\n- `/model <provider> <name> <api_key> [base_url]` - Add a new model.\n  - Providers: `openai`, `gemini`, `groq`, `ollama` \n- `/switch <model_name>` - Switch to another model.\n- `/remove <model_name>` - Remove a model from config.\n- `/rename <old> <new>` - Rename an existing model.\n- `/clear` - Clear chat history.\n- `/help` - Show help message.\n- `ESC` - Exit.\n\n### Keybindings\n\n- `Enter`: Send message\n- `Up/Down/PgUp/PgDn`: Scroll chat history\n- `Left/Right/Home/End`: Navigate input cursor\n- `Delete/Backspace`: Edit text\n\n### Interaction\n\n- **Sidebar**: Click on a model name to switch models.\n- **Chat**: Use Mouse Wheel to scroll history.\n\n## Configuration\n\nConfig is stored in `~/.config/query.rs/config.json`.";
         let help_md = tui_markdown::from_str(help_text);
+        
+        let help_inner_width = chat_area.width.saturating_sub(2) as usize;
+        let wrapped_help = textwrap::wrap(help_text, help_inner_width);
+        let total_help_lines = wrapped_help.len() as u16;
+        let view_height = chat_area.height.saturating_sub(2);
+        
+        // Help scroll logic (from top)
+        let max_help_scroll = total_help_lines.saturating_sub(view_height);
+        let clamped_help_scroll = app.help_scroll.min(max_help_scroll);
+        let help_scroll_y = max_help_scroll.saturating_sub(clamped_help_scroll);
+
         let help_para = Paragraph::new(help_md)
             .block(Block::default().borders(Borders::ALL).title("Help Menu"))
-            .wrap(ratatui::widgets::Wrap { trim: false });
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .scroll((help_scroll_y, 0));
         f.render_widget(help_para, chat_area);
     } else {
         let mut full_chat_raw = String::new();
