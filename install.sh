@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="femboi/query.rs"
-BIN="query"
+REPO="bitscale-tech/query.rs"
+BIN="query-rs"
 INSTALL_DIR="${HOME}/.local/bin"
 
 ARCH=$(uname -m)
 case $ARCH in
-  x86_64)   TARGET="x86_64-unknown-linux-musl" ;;
-  aarch64)  TARGET="aarch64-unknown-linux-musl" ;;
+  x86_64)   TARGET="query-rs-x86_64-linux" ;;
+  aarch64)  TARGET="query-rs-aarch64-linux" ;;
   *)        echo "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
@@ -20,7 +20,7 @@ LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
 
 echo "Installing ${BIN} ${LATEST}..."
 
-URL="https://github.com/${REPO}/releases/download/${LATEST}/${BIN}-${TARGET}"
+URL="https://github.com/${REPO}/releases/download/${LATEST}/${TARGET}"
 
 mkdir -p "${INSTALL_DIR}"
 curl -fsSL "${URL}" -o "${INSTALL_DIR}/${BIN}"
