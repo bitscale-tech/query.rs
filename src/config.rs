@@ -29,6 +29,7 @@ pub struct McpServerConfig {
 pub struct Config {
     pub models: HashMap<String, ModelConfig>,
     pub current_model: Option<String>,
+    #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerConfig>,
 }
 
