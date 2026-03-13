@@ -5,30 +5,29 @@ An AI client for the terminal.
 
 - **Rich Markdown Rendering**: AI responses are rendered with syntax highlighting and rich formatting.
 - **Auto-Wrapping & Scrolling**: Smooth terminal experience with full-text wrapping and manual/automatic scroll support.
+- **Model Context Protocol (MCP)**: Native support for MCP servers to give the AI access to tools.
 - **Provider Support**: Works with OpenAI-compatible APIs (Groq, Ollama) and Google Gemini.
-- **Model Management**: Easily add and switch between models via the `/model` command.
-- **Fully Static Binaries**: Compiled against `musl` for zero-dependency deployment on Linux (x86_64 and aarch64).
+- **Full Mouse Support**: Selection, scrolling, and interaction via mouse.
+- **Fully Static Binaries**: Compiled for zero-dependency deployment on Linux (x86_64 and aarch64).
 
-#### // TODO: 
+## Documentation
 
-- {✓}~~**Fix aarch64 Builds** *by switching `aws-lc-rs` with `ring` and `rustls-tls-native-roots` with `rustls-tls-webpki-roots`*~~
-- {✓}~~**Model removing**~~
-- {✓}~~**Model renaming**~~
-- {✓}~~**Mouse scroll support in Chat**~~
-- { }**Config files**
-- { }**MCP access**
-- { }**Add more providers**
-- { }**Revamped chat UI**
+Comprehensive documentation is available in the `docs/` directory:
+- [Installation](docs/installation.md) - Building and setup.
+- [Usage Guide](docs/usage.md) - Commands and keyboard shortcuts.
+- [Configuration](docs/configuration.md) - JSON structure and settings.
+- [MCP Integration](docs/mcp.md) - How to use Model Context Protocol.
+- [Architecture](docs/architecture.md) - Internal design overview.
 
 ## Installation
 
-You can install `query.rs` using the provided install script:
+You can build from source:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/felixdayapper/query.rs/master/install.sh | sh
+cargo build --release
 ```
 
-Or build from source:
+Or run the build script:
 
 ```bash
 bash build.sh
@@ -39,35 +38,19 @@ bash build.sh
 Run the binary:
 
 ```bash
-./query-rs
+./query-rs-x86_64-linux
 ```
 
-### Commands
+### Quick Commands
 
 - `/model <provider> <name> <api_key> [base_url]` - Add a new model.
-  - Providers: `openai`, `gemini`, `groq`, `ollama`
-- `/switch <model_name>` - Switch to a different model.
-- `/remove <model_name>` - Remove a model from config.
-- `/rename <old_name> <new_name>` - Rename an existing model.
-- `/clear` - Clear chat history.
-- `/help` - Show help message.
-- `ESC` - Exit.
-
-### Interaction
-
-- **Sidebar**: Click a model name to switch models.
-- **Chat**: Use Mouse Wheel to scroll history.
-
-### Keybindings
-
-- `Enter`: Send message
-- `Up/Down/PgUp/PgDn`: Scroll chat history (also supports mouse wheel)
-- `Left/Right/Home/End`: Navigate input cursor
-- `Delete/Backspace`: Edit text
+- `/switch <model_name>` - Switch models.
+- `/mcp add <name> <cmd> [args]` - Add an MCP tool.
+- `/help` - Show all commands in an overlay.
 
 ## Configuration
 
-Models info is stored in `~/.config/query.rs/models.json`.
+Settings and models are stored in `~/.config/query.rs/config.json`.
 
 ## License
 
