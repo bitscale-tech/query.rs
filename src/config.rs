@@ -18,10 +18,18 @@ pub struct ModelConfig {
     pub provider: Provider,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct McpServerConfig {
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Config {
     pub models: HashMap<String, ModelConfig>,
     pub current_model: Option<String>,
+    pub mcp_servers: HashMap<String, McpServerConfig>,
 }
 
 impl Config {
@@ -47,7 +55,7 @@ impl Config {
     fn get_path() -> Result<PathBuf> {
         let mut path = dirs::config_dir().context("Could not find config directory")?;
         path.push("query.rs");
-        path.push("models.json");
+        path.push("config.json");
         Ok(path)
     }
 

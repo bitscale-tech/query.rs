@@ -1,9 +1,11 @@
 mod config;
 mod api;
+mod mcp;
 
 use anyhow::Result;
 use api::{ApiClient, Message};
 use config::Config;
+use mcp::McpManager;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -20,6 +22,7 @@ use termimad::MadSkin;
 use ansi_to_tui::IntoText;
 use std::io;
 use std::time::Duration;
+use std::sync::Arc;
 
 struct App {
     config: Config,
@@ -31,6 +34,7 @@ struct App {
     cursor_pos: usize,
     show_help: bool,
     help_scroll: u16,
+    mcp_manager: Arc<McpManager>,
 }
 
 impl App {
@@ -46,7 +50,18 @@ impl App {
             cursor_pos: 0,
             show_help: false,
             help_scroll: 0,
+            mcp_manager: Arc::new(McpManager::new()),
         })
+    }
+
+    async fn init(&mut self) -> Result<()> {
+        let servers = self.config.mcp_servers.clone();
+        for (name, config) in servers {
+            if let Err(e) = self.mcp_manager.add_server(&name, &config).await {
+                self.status_message = format!("Failed to connect to MCP server {}: {}", name, e);
+            }
+        }
+        Ok(())
     }
 
     fn handle_command(&mut self) {
@@ -137,6 +152,33 @@ impl App {
             self.messages.clear();
             self.chat_scroll = 0;
             self.status_message = "Chat history cleared.".to_string();
+        } else if self.input.starts_with("/mcp") {
+            let parts: Vec<&str> = self.input.split_whitespace().collect();
+            if parts.len() >= 3 && parts[1] == "add" {
+                let name = parts[2].to_string();
+                let command = parts[3].to_string();
+                let args = parts[4..].iter().map(|s| s.to_string()).collect::<Vec<_>>();
+                let config = config::McpServerConfig {
+                    command,
+                    args,
+                    env: std::collections::HashMap::new(),
+                };
+                self.config.mcp_servers.insert(name.clone(), config.clone());
+                if let Err(e) = self.config.save() {
+                    self.status_message = format!("Error saving config: {}", e);
+                } else {
+                    self.status_message = format!("MCP Server {} added. Connecting...", name);
+                    let mcp = self.mcp_manager.clone();
+                    tokio::spawn(async move {
+                        let _ = mcp.add_server(&name, &config).await;
+                    });
+                }
+            } else if parts.len() >= 2 && parts[1] == "list" {
+                let servers: Vec<String> = self.config.mcp_servers.keys().cloned().collect();
+                self.status_message = format!("MCP Servers: {}", servers.join(", "));
+            } else {
+                self.status_message = "Usage: /mcp add <name> <command> [args...] or /mcp list".to_string();
+            }
         } else {
             self.status_message = "Unknown command.".to_string();
         }
@@ -155,6 +197,7 @@ async fn main() -> Result<()> {
 
     // Create app and run it
     let mut app = App::new()?;
+    app.init().await?;
     let res = run_app(&mut terminal, &mut app).await;
 
     // Restore terminal
@@ -165,6 +208,8 @@ async fn main() -> Result<()> {
         DisableMouseCapture
     )?;
     terminal.show_cursor()?;
+
+    app.mcp_manager.shutdown().await;
 
     if let Err(err) = res {
         println!("{:?}", err);
@@ -206,22 +251,66 @@ where
                                     
                                     if let Some(name) = model_name {
                                         if let Some(model_config) = app.config.models.get(&name) {
-                                            app.messages.push(Message {
-                                                role: "user".to_string(),
-                                                content: input.clone(),
-                                            });
+                                            app.messages.push(crate::api::Message::new("user", &input));
                                             app.is_loading = true;
                                             app.status_message = format!("Waiting for {}...", name);
                                             app.chat_scroll = 0; // Scroll to bottom
                                             
                                             let api_config = model_config.clone();
-                                            let messages = app.messages.clone();
+                                            let mut messages = app.messages.clone();
                                             let tx = tx.clone();
+                                            let mcp = app.mcp_manager.clone();
                                             
                                             tokio::spawn(async move {
                                                 let client = ApiClient::new();
-                                                let res = client.send_chat_completion(&api_config, messages).await;
-                                                let _ = tx.send(Action::ApiResponse(res)).await;
+                                                loop {
+                                                    let tools = mcp.list_tools().await.unwrap_or_default();
+                                                    let res = client.send_chat_completion(&api_config, messages.clone(), tools).await;
+                                                    
+                                                    match res {
+                                                        Ok(crate::api::ApiResult::ToolCall(assistant_msg, tool_name, tool_args)) => {
+                                                            messages.push(assistant_msg.clone());
+                                                            let _ = tx.send(Action::ApiResponse(Ok(format!("Calling tool: {}...", tool_name)))).await;
+                                                            
+                                                            match mcp.call_tool(&tool_name, tool_args).await {
+                                                                Ok(result) => {
+                                                                    let mut tool_output = String::new();
+                                                                    for content in result.content {
+                                                                        match &*content {
+                                                                            rmcp::model::RawContent::Text(t) => {
+                                                                                tool_output.push_str(&t.text);
+                                                                            }
+                                                                            _ => {}
+                                                                        }
+                                                                    }
+                                                                    
+                                                                    let tc_id = assistant_msg.tool_calls.as_ref()
+                                                                        .and_then(|calls| calls.first())
+                                                                        .map(|tc| tc.id.clone())
+                                                                        .unwrap_or_else(|| "unknown".to_string());
+
+                                                                    messages.push(crate::api::Message::new_tool_response(
+                                                                        &tool_name,
+                                                                        &tc_id,
+                                                                        &tool_output,
+                                                                    ));
+                                                                }
+                                                                Err(e) => {
+                                                                    let _ = tx.send(Action::ApiResponse(Err(anyhow::anyhow!("Tool call failed: {}", e)))).await;
+                                                                    break;
+                                                                }
+                                                            }
+                                                        }
+                                                        Ok(crate::api::ApiResult::Text(text)) => {
+                                                            let _ = tx.send(Action::ApiResponse(Ok(text))).await;
+                                                            break;
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = tx.send(Action::ApiResponse(Err(e))).await;
+                                                            break;
+                                                        }
+                                                    }
+                                                }
                                             });
                                         }
                                     } else {
@@ -372,10 +461,7 @@ where
                     app.is_loading = false;
                     match res {
                         Ok(response) => {
-                            app.messages.push(Message {
-                                role: "assistant".to_string(),
-                                content: response,
-                            });
+                            app.messages.push(Message::new("assistant", &response));
                             app.status_message = "Response received.".to_string();
                             app.chat_scroll = 0; // Scroll to bottom
                         }
@@ -437,7 +523,7 @@ fn ui(f: &mut Frame, app: &App) {
     // Chat history or Help
     let chat_area = body_chunks[1];
     if app.show_help {
-        let help_text = "### Commands\n\n- `/model <provider> <name> <api_key> [base_url]` - Add a new model.\n  - Providers: `openai`, `gemini`, `groq`, `ollama` \n- `/switch <model_name>` - Switch to another model.\n- `/remove <model_name>` - Remove a model from config.\n- `/rename <old> <new>` - Rename an existing model.\n- `/clear` - Clear chat history.\n- `/help` - Show help message.\n- `ESC` - Exit.\n\n### Keybindings\n\n- `Enter`: Send message\n- `Up/Down/PgUp/PgDn`: Scroll chat history\n- `Left/Right/Home/End`: Navigate input cursor\n- `Delete/Backspace`: Edit text\n\n### Interaction\n\n- **Sidebar**: Click on a model name to switch models.\n- **Chat**: Use Mouse Wheel to scroll history.\n\n## Configuration\n\nModels info is stored in `~/.config/query.rs/models.json`.";
+        let help_text = "### Commands\n\n- `/model <provider> <name> <api_key> [base_url]` - Add a new model.\n  - Providers: `openai`, `gemini`, `groq`, `ollama` \n- `/switch <model_name>` - Switch to another model.\n- `/remove <model_name>` - Remove a model from config.\n- `/rename <old> <new>` - Rename an existing model.\n- `/mcp add <name> <cmd> [args]` - Add an MCP server.\n- `/clear` - Clear chat history.\n- `/help` - Show help message.\n- `ESC` - Exit.\n\n### Keybindings\n\n- `Enter`: Send message\n- `Up/Down/PgUp/PgDn`: Scroll chat history\n- `Left/Right/Home/End`: Navigate input cursor\n- `Delete/Backspace`: Edit text\n\n### Interaction\n\n- **Sidebar**: Click on a model name to switch models.\n- **Chat**: Use Mouse Wheel to scroll history.\n\n## Configuration\n\nModels info is stored in `~/.config/query.rs/config.json`.";
         
         let skin = MadSkin::default();
         let help_ansi = skin.term_text(help_text).to_string();
@@ -463,8 +549,9 @@ fn ui(f: &mut Frame, app: &App) {
         let mut full_chat_md = String::new();
         for m in &app.messages {
             let prefix = if m.role == "user" { "You" } else { "AI" };
-            full_chat_raw.push_str(&format!("{}: {}\n\n", prefix, m.content));
-            full_chat_md.push_str(&format!("**{}**: {}\n\n", prefix, m.content));
+            let content = m.content_text();
+            full_chat_raw.push_str(&format!("{}: {}\n\n", prefix, content));
+            full_chat_md.push_str(&format!("**{}**: {}\n\n", prefix, content));
         }
         
         // Calculate total lines for scrolling
