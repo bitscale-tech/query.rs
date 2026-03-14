@@ -4,11 +4,19 @@ An AI client for the terminal.
 ## Features
 
 - **Rich Markdown Rendering**: AI responses are rendered with syntax highlighting and rich formatting.
-- **Auto-Wrapping & Scrolling**: Smooth terminal experience with full-text wrapping and manual/automatic scroll support.
 - **Model Context Protocol (MCP)**: Native support for MCP servers to give the AI access to tools.
-- **Provider Support**: Works with OpenAI-compatible APIs (Groq, Ollama) and Google Gemini.
+- **Provider Support**: Works with OpenAI-compatible APIs (Groq, Ollama), Google Gemini, Anthropic Claude, and more.
 - **Full Mouse Support**: Selection, scrolling, and interaction via mouse.
-- **Fully Static Binaries**: Compiled for zero-dependency deployment on Linux (x86_64 and aarch64).
+
+**// TODO for v1:**
+- Better MCP support
+- New Chat UI
+- Some more providers
+- Better error handling
+- Adding the other parts of docs into the `/help` menu
+- .env support for the API Configuration
+- Memory at `~/.config/query.rs/memory.json`
+- Token count menu
 
 ## Documentation
 
