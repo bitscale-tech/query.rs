@@ -69,6 +69,14 @@ struct OpenAiFunction {
 #[derive(Debug, Serialize, Deserialize)]
 struct ChatCompletionResponse {
     choices: Vec<Choice>,
+    usage: Option<Usage>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct Usage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -147,6 +155,18 @@ pub struct GeminiFunctionResponse {
 #[derive(Debug, Serialize, Deserialize)]
 struct GeminiResponse {
     candidates: Vec<GeminiCandidate>,
+    #[serde(rename = "usageMetadata")]
+    usage_metadata: Option<GeminiUsageMetadata>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GeminiUsageMetadata {
+    #[serde(rename = "promptTokenCount")]
+    prompt_token_count: u32,
+    #[serde(rename = "candidatesTokenCount")]
+    candidates_token_count: u32,
+    #[serde(rename = "totalTokenCount")]
+    total_token_count: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -156,8 +176,8 @@ struct GeminiCandidate {
 
 #[derive(Debug, Clone)]
 pub enum ApiResult {
-    Text(String),
-    ToolCall(Message, String, Value), // Assistant message to save, tool name, arguments
+    Text(String, Usage),
+    ToolCall(Message, String, Value, Usage), // Assistant message to save, tool name, arguments, usage
 }
 
 pub struct ApiClient {
@@ -180,6 +200,7 @@ impl ApiClient {
         match config.provider {
             Provider::OpenAICompat => self_openai(&self.client, config, messages, tools).await,
             Provider::Gemini => self_gemini(&self.client, config, messages, tools).await,
+            Provider::Anthropic => self_anthropic(&self.client, config, messages, tools).await,
         }
     }
 }
@@ -219,6 +240,7 @@ async fn self_openai(client: &Client, config: &ModelConfig, messages: Vec<Messag
     }
 
     let body = response.json::<ChatCompletionResponse>().await?;
+    let usage = body.usage.clone().unwrap_or_default();
     let choice = body.choices.get(0).context("No choice in response")?;
     
     if let Some(tool_calls) = choice.message.tool_calls.as_ref() {
@@ -231,11 +253,11 @@ async fn self_openai(client: &Client, config: &ModelConfig, messages: Vec<Messag
                 tool_call_id: None,
                 name: None,
             };
-            return Ok(ApiResult::ToolCall(assistant_msg, tc.function.name.clone(), args));
+            return Ok(ApiResult::ToolCall(assistant_msg, tc.function.name.clone(), args, usage));
         }
     }
     if let Some(content) = choice.message.content.as_ref() {
-        return Ok(ApiResult::Text(content.clone()));
+        return Ok(ApiResult::Text(content.clone(), usage));
     }
     
     Err(anyhow::anyhow!("No content or tool calls in OpenAI response"))
@@ -305,6 +327,12 @@ async fn self_gemini(client: &Client, config: &ModelConfig, messages: Vec<Messag
     }
 
     let body = response.json::<GeminiResponse>().await?;
+    let usage = body.usage_metadata.as_ref().map(|u| Usage {
+        prompt_tokens: u.prompt_token_count,
+        completion_tokens: u.candidates_token_count,
+        total_tokens: u.total_token_count,
+    }).unwrap_or_default();
+
     let candidate = body.candidates.get(0).context("No candidate in Gemini response")?;
     if let Some(part) = candidate.content.parts.iter().find(|p| p.function_call.is_some()) {
         if let Some(fc) = &part.function_call {
@@ -323,15 +351,158 @@ async fn self_gemini(client: &Client, config: &ModelConfig, messages: Vec<Messag
                 tool_call_id: None,
                 name: None,
             };
-            return Ok(ApiResult::ToolCall(assistant_msg, fc.name.clone(), fc.args.clone()));
+            return Ok(ApiResult::ToolCall(assistant_msg, fc.name.clone(), fc.args.clone(), usage));
         }
     }
     
     if let Some(part) = candidate.content.parts.iter().find(|p| p.text.is_some()) {
         if let Some(text) = &part.text {
-            return Ok(ApiResult::Text(text.clone()));
+            return Ok(ApiResult::Text(text.clone(), usage));
         }
     }
     
     Err(anyhow::anyhow!("No text or function call in Gemini response"))
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AnthropicRequest {
+    model: String,
+    messages: Vec<AnthropicMessage>,
+    max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<AnthropicTool>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AnthropicMessage {
+    role: String,
+    content: Vec<AnthropicContentPart>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum AnthropicContentPart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "tool_use")]
+    ToolUse { id: String, name: String, input: Value },
+    #[serde(rename = "tool_result")]
+    ToolResult { tool_use_id: String, content: String },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AnthropicTool {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    input_schema: Value,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AnthropicResponse {
+    content: Vec<AnthropicContentPart>,
+    usage: AnthropicUsage,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AnthropicUsage {
+    input_tokens: u32,
+    output_tokens: u32,
+}
+
+async fn self_anthropic(client: &Client, config: &ModelConfig, messages: Vec<Message>, tools: Vec<Tool>) -> Result<ApiResult> {
+    let url = "https://api.anthropic.com/v1/messages";
+    
+    let anthropic_tools = if tools.is_empty() {
+        None
+    } else {
+        Some(tools.into_iter().map(|t| AnthropicTool {
+            name: t.name.to_string(),
+            description: t.description.map(|d| d.to_string()),
+            input_schema: Value::Object(t.input_schema.as_ref().clone()),
+        }).collect())
+    };
+
+    let anthropic_messages = messages.into_iter().map(|m| {
+        let mut parts = Vec::new();
+        if let Some(text) = m.content.as_ref() {
+            if m.tool_call_id.is_some() {
+                parts.push(AnthropicContentPart::ToolResult {
+                    tool_use_id: m.tool_call_id.clone().unwrap(),
+                    content: text.clone(),
+                });
+            } else {
+                parts.push(AnthropicContentPart::Text { text: text.clone() });
+            }
+        }
+        if let Some(tool_calls) = m.tool_calls.as_ref() {
+            for tc in tool_calls {
+                parts.push(AnthropicContentPart::ToolUse {
+                    id: tc.id.clone(),
+                    name: tc.function.name.clone(),
+                    input: serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null),
+                });
+            }
+        }
+        AnthropicMessage {
+            role: if m.role == "assistant" { "assistant".to_string() } else { "user".to_string() },
+            content: parts,
+        }
+    }).collect();
+
+    let request = AnthropicRequest {
+        model: config.name.clone(),
+        messages: anthropic_messages,
+        max_tokens: 4096,
+        tools: anthropic_tools,
+    };
+
+    let response = client
+        .post(url)
+        .header("x-api-key", &config.api_key)
+        .header("anthropic-version", "2023-06-01")
+        .json(&request)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        let error = response.text().await?;
+        return Err(anyhow::anyhow!("Anthropic API Error: {}", error));
+    }
+
+    let body = response.json::<AnthropicResponse>().await?;
+    let usage = Usage {
+        prompt_tokens: body.usage.input_tokens,
+        completion_tokens: body.usage.output_tokens,
+        total_tokens: body.usage.input_tokens + body.usage.output_tokens,
+    };
+
+    if let Some(part) = body.content.iter().find(|p| matches!(p, AnthropicContentPart::ToolUse { .. })) {
+        if let AnthropicContentPart::ToolUse { id, name, input } = part {
+            let tc = ToolCall {
+                id: id.clone(),
+                r#type: "function".to_string(),
+                function: ToolCallFunction {
+                    name: name.clone(),
+                    arguments: input.to_string(),
+                },
+            };
+            let assistant_msg = Message {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![tc]),
+                tool_call_id: None,
+                name: None,
+            };
+            return Ok(ApiResult::ToolCall(assistant_msg, name.clone(), input.clone(), usage));
+        }
+    }
+
+    if let Some(part) = body.content.iter().find(|p| matches!(p, AnthropicContentPart::Text { .. })) {
+        if let AnthropicContentPart::Text { text } = part {
+            return Ok(ApiResult::Text(text.clone(), usage));
+        }
+    }
+
+    Err(anyhow::anyhow!("No text or tool use in Anthropic response"))
 }

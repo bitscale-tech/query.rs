@@ -9,6 +9,8 @@ use tokio::sync::Mutex;
 use tokio::process::Command;
 use std::borrow::Cow;
 
+use std::process::Stdio;
+
 pub type McpClientHandle = RunningService<RoleClient, ()>;
 
 pub struct McpManager {
@@ -32,6 +34,7 @@ impl McpManager {
         for (k, v) in &config.env {
             cmd.env(k, v);
         }
+        cmd.stderr(Stdio::null());
         
         let transport = TokioChildProcess::new(cmd).context("Failed to spawn MCP server")?;
         let running_service: McpClientHandle = serve_client((), transport).await

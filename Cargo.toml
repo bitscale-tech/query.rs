@@ -17,6 +17,8 @@ tokio = { version = "1.50.0", features = ["full"] }
 termimad = "0.31.1"
 ansi-to-tui = "8.0.1"
 rmcp = { version = "1.2.0", features = ["client", "transport-io", "transport-child-process"] }
+chrono = "0.4.39"
+dotenvy = "0.15.7"
 
 [[bin]]
 name = "query-rs"

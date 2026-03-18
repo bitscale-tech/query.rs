@@ -17,9 +17,10 @@
 Commands are entered in the input box starting with a forward slash `/`.
 
 ### Model Management
-- `/model <provider> <name> <api_key> [base_url]`: Add a new model.
-    - Providers: `gemini`, `openai`, `groq`, `ollama`.
-- `/switch <model_name>`: Switch to a different configured model.
+- `/add <provider> <name> <api_key> [base_url]`: Add a new model.
+    - Providers: `gemini`, `openai`, `anthropic`, `groq`, `ollama`.
+- `/model <model_name>`: Switch to a different configured model.
+- `/sidebar`: Toggle the visibility of the models list.
 - `/remove <model_name>`: Remove a model from your configuration.
 - `/rename <old_name> <new_name>`: Rename an existing model.
 

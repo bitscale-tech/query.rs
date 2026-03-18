@@ -8,6 +8,7 @@ use std::path::PathBuf;
 pub enum Provider {
     OpenAICompat,
     Gemini,
+    Anthropic,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -25,19 +26,57 @@ pub struct McpServerConfig {
     pub env: HashMap<String, String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub models: HashMap<String, ModelConfig>,
     pub current_model: Option<String>,
-    #[serde(default)]
+    #[serde(default = "default_mcp_servers")]
     pub mcp_servers: HashMap<String, McpServerConfig>,
+    #[serde(default = "default_true")]
+    pub show_sidebar: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            models: HashMap::new(),
+            current_model: None,
+            mcp_servers: default_mcp_servers(),
+            show_sidebar: default_true(),
+        }
+    }
+}
+
+fn default_true() -> bool { true }
+
+fn default_mcp_servers() -> HashMap<String, McpServerConfig> {
+    let mut m = HashMap::new();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    
+    m.insert("filesystem".to_string(), McpServerConfig {
+        command: "npx".to_string(),
+        args: vec![
+            "-y".to_string(), 
+            "@modelcontextprotocol/server-filesystem".to_string(), 
+            cwd.display().to_string()
+        ],
+        env: HashMap::new(),
+    });
+    m.insert("everything".to_string(), McpServerConfig {
+        command: "npx".to_string(),
+        args: vec!["-y".to_string(), "@modelcontextprotocol/server-everything".to_string()],
+        env: HashMap::new(),
+    });
+    m
 }
 
 impl Config {
     pub fn load() -> Result<Self> {
         let path = Self::get_path()?;
         if !path.exists() {
-            return Ok(Self::default());
+            let config = Self::default();
+            config.save()?;
+            return Ok(config);
         }
         let content = fs::read_to_string(&path)?;
         serde_json::from_str(&content).context("Failed to parse config")
@@ -64,6 +103,7 @@ impl Config {
         let base_url = base_url.unwrap_or_else(|| match provider {
             Provider::Gemini => "https://generativelanguage.googleapis.com".to_string(),
             Provider::OpenAICompat => "https://api.openai.com/v1".to_string(),
+            Provider::Anthropic => "https://api.anthropic.com".to_string(),
         });
 
         self.models.insert(name.clone(), ModelConfig {

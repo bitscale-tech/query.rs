@@ -1,6 +1,10 @@
 mod config;
 mod api;
 mod mcp;
+mod ui;
+mod memory;
+
+use memory::Memory;
 
 use anyhow::Result;
 use api::{ApiClient, Message};
@@ -14,27 +18,28 @@ use crossterm::{
 use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
-    Frame, Terminal,
+    Terminal,
 };
-use termimad::MadSkin;
-use ansi_to_tui::IntoText;
+use dotenvy;
 use std::io;
 use std::time::Duration;
 use std::sync::Arc;
 
-struct App {
-    config: Config,
-    messages: Vec<Message>,
-    input: String,
-    status_message: String,
-    is_loading: bool,
-    chat_scroll: u16,
-    cursor_pos: usize,
-    show_help: bool,
-    help_scroll: u16,
-    mcp_manager: Arc<McpManager>,
+pub(crate) struct App {
+    pub(crate) config: Config,
+    pub(crate) messages: Vec<Message>,
+    pub(crate) input: String,
+    pub(crate) status_message: String,
+    pub(crate) is_loading: bool,
+    pub(crate) chat_scroll: u16,
+    pub(crate) cursor_pos: usize,
+    pub(crate) show_help: bool,
+    pub(crate) help_scroll: u16,
+    pub(crate) mcp_manager: Arc<McpManager>,
+    pub(crate) version: String,
+    pub(crate) update_available: Option<String>,
+    pub(crate) memory: Memory,
+    pub(crate) total_tokens: u32,
 }
 
 impl App {
@@ -51,6 +56,10 @@ impl App {
             show_help: false,
             help_scroll: 0,
             mcp_manager: Arc::new(McpManager::new()),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            update_available: None,
+            memory: Memory::load().unwrap_or_default(),
+            total_tokens: 0,
         })
     }
 
@@ -65,15 +74,17 @@ impl App {
     }
 
     fn handle_command(&mut self) {
-        if self.input.starts_with("/model") {
+        if self.input.starts_with("/add") {
             let parts: Vec<&str> = self.input.split_whitespace().collect();
             if parts.len() >= 4 {
+                // Add model: /add <provider> <name> <api_key> [base_url]
                 let provider_str = parts[1].to_lowercase();
                 let provider = match provider_str.as_str() {
                     "gemini" => config::Provider::Gemini,
                     "openai" | "groq" | "ollama" => config::Provider::OpenAICompat,
+                    "anthropic" | "claude" => config::Provider::Anthropic,
                     _ => {
-                        self.status_message = "Unknown provider. Use: gemini, openai, groq, ollama".to_string();
+                        self.status_message = "Unknown provider. Use: gemini, openai, anthropic, groq, ollama".to_string();
                         self.input.clear();
                         return;
                     }
@@ -89,21 +100,27 @@ impl App {
                     self.config.current_model = Some(name);
                 }
             } else {
-                self.status_message = "Usage: /model <provider> <name> <api_key> [base_url]".to_string();
+                self.status_message = "Usage: /add <provider> <name> <key> [url]".to_string();
             }
-        } else if self.input.starts_with("/switch") {
+        } else if self.input.starts_with("/model") {
             let parts: Vec<&str> = self.input.split_whitespace().collect();
-            if parts.len() >= 2 {
+            if parts.len() == 2 {
+                // Switch model: /model <name>
                 let name = parts[1].to_string();
                 if self.config.models.contains_key(&name) {
                     self.config.current_model = Some(name.clone());
                     self.status_message = format!("Switched to model: {}", name);
+                    let _ = self.config.save();
                 } else {
                     self.status_message = format!("Model {} not found.", name);
                 }
             } else {
-                self.status_message = "Usage: /switch <model_name>".to_string();
+                self.status_message = "Usage: /model <name>".to_string();
             }
+        } else if self.input == "/sidebar" {
+            self.config.show_sidebar = !self.config.show_sidebar;
+            let _ = self.config.save();
+            self.status_message = format!("Sidebar {}", if self.config.show_sidebar { "enabled" } else { "disabled" });
         } else if self.input.starts_with("/remove") {
             let parts: Vec<&str> = self.input.split_whitespace().collect();
             if parts.len() >= 2 {
@@ -179,6 +196,12 @@ impl App {
             } else {
                 self.status_message = "Usage: /mcp add <name> <command> [args...] or /mcp list".to_string();
             }
+        } else if self.input == "/save" {
+            if let Err(e) = self.memory.save() {
+                self.status_message = format!("Error saving memory: {}", e);
+            } else {
+                self.status_message = "Memory saved to memory.json".to_string();
+            }
         } else {
             self.status_message = "Unknown command.".to_string();
         }
@@ -188,6 +211,7 @@ impl App {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -221,7 +245,7 @@ async fn main() -> Result<()> {
 use tokio::sync::mpsc;
 
 enum Action {
-    ApiResponse(Result<String>),
+    ApiResponse(Result<(String, crate::api::Usage)>),
 }
 
 async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<()> 
@@ -231,7 +255,7 @@ where
     let (tx, mut rx) = mpsc::channel(10);
 
     loop {
-        terminal.draw(|f| ui(f, app))?;
+        terminal.draw(|f| ui::ui(f, app))?;
 
         if event::poll(Duration::from_millis(100))? {
                 match event::read()? {
@@ -268,9 +292,9 @@ where
                                                     let res = client.send_chat_completion(&api_config, messages.clone(), tools).await;
                                                     
                                                     match res {
-                                                        Ok(crate::api::ApiResult::ToolCall(assistant_msg, tool_name, tool_args)) => {
+                                                        Ok(crate::api::ApiResult::ToolCall(assistant_msg, tool_name, tool_args, usage)) => {
                                                             messages.push(assistant_msg.clone());
-                                                            let _ = tx.send(Action::ApiResponse(Ok(format!("Calling tool: {}...", tool_name)))).await;
+                                                            let _ = tx.send(Action::ApiResponse(Ok((format!("Calling tool: {}...", tool_name), usage)))).await;
                                                             
                                                             match mcp.call_tool(&tool_name, tool_args).await {
                                                                 Ok(result) => {
@@ -301,8 +325,8 @@ where
                                                                 }
                                                             }
                                                         }
-                                                        Ok(crate::api::ApiResult::Text(text)) => {
-                                                            let _ = tx.send(Action::ApiResponse(Ok(text))).await;
+                                                        Ok(crate::api::ApiResult::Text(text, usage)) => {
+                                                            let _ = tx.send(Action::ApiResponse(Ok((text, usage)))).await;
                                                             break;
                                                         }
                                                         Err(e) => {
@@ -391,20 +415,23 @@ where
                     }
                     Event::Mouse(mouse) => {
                         let size = terminal.size()?;
-                        let main_chunks = Layout::default()
+                        let chunks = Layout::default()
                             .direction(Direction::Vertical)
                             .constraints([
-                                Constraint::Length(3),
-                                Constraint::Min(0),
-                                Constraint::Length(3),
-                                Constraint::Length(1),
-                            ].as_ref())
+                                Constraint::Length(9),  // Banner
+                                Constraint::Min(0),     // Body
+                                Constraint::Length(1),  // Shortcuts
+                                Constraint::Length(1),  // Separator
+                                Constraint::Length(1),  // Edit hint
+                                Constraint::Length(3),  // Input
+                                Constraint::Length(1),  // Footer
+                            ])
                             .split(size.into());
                         
                         let body_chunks = Layout::default()
                             .direction(Direction::Horizontal)
-                            .constraints([Constraint::Percentage(20), Constraint::Percentage(80)].as_ref())
-                            .split(main_chunks[1]);
+                            .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
+                            .split(chunks[1]);
                         
                         let sidebar = body_chunks[0];
                         let chat_area = body_chunks[1];
@@ -460,9 +487,19 @@ where
                 Action::ApiResponse(res) => {
                     app.is_loading = false;
                     match res {
-                        Ok(response) => {
-                            app.messages.push(Message::new("assistant", &response));
-                            app.status_message = "Response received.".to_string();
+                        Ok((response, usage)) => {
+                            app.total_tokens += usage.total_tokens;
+                            let assistant_msg = Message::new("assistant", &response);
+                            app.messages.push(assistant_msg.clone());
+                            
+                            // Save to memory
+                            app.memory.add_interaction(vec![
+                                app.messages[app.messages.len()-2].clone(), // Previous user msg
+                                assistant_msg,
+                            ]);
+                            let _ = app.memory.save();
+
+                            app.status_message = format!("Response received. Usage: {} tokens", usage.total_tokens);
                             app.chat_scroll = 0; // Scroll to bottom
                         }
                         Err(e) => {
@@ -475,136 +512,3 @@ where
     }
 }
 
-fn ui(f: &mut Frame, app: &App) {
-    let main_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(
-            [
-                Constraint::Length(3),
-                Constraint::Min(0),
-                Constraint::Length(3),
-                Constraint::Length(1),
-            ]
-            .as_ref(),
-        )
-        .split(f.area());
-
-    // Status / Title bar
-    let current_model = app.config.current_model.as_deref().unwrap_or("None");
-    let title = Paragraph::new(format!("Current Model: {}", current_model))
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-        .block(Block::default().borders(Borders::ALL).title("Query.rs"));
-    f.render_widget(title, main_chunks[0]);
-
-    // Body with Sidebar and Chat
-    let body_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(20), Constraint::Percentage(80)].as_ref())
-        .split(main_chunks[1]);
-
-    // Sidebar: Models
-    let mut model_names: Vec<&String> = app.config.models.keys().collect();
-    model_names.sort();
-    let models: Vec<ListItem> = model_names.iter()
-        .map(|&m| {
-            let style = if Some(m.as_str()) == app.config.current_model.as_deref() {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            ListItem::new(m.as_str()).style(style)
-        })
-        .collect();
-    let model_list = List::new(models)
-        .block(Block::default().borders(Borders::ALL).title("Models"))
-        .style(Style::default().fg(Color::White));
-    f.render_widget(model_list, body_chunks[0]);
-
-    // Chat history or Help
-    let chat_area = body_chunks[1];
-    if app.show_help {
-        let help_text = "### Commands\n\n- `/model <provider> <name> <api_key> [base_url]` - Add a new model.\n  - Providers: `openai`, `gemini`, `groq`, `ollama` \n- `/switch <model_name>` - Switch to another model.\n- `/remove <model_name>` - Remove a model from config.\n- `/rename <old> <new>` - Rename an existing model.\n- `/mcp add <name> <cmd> [args]` - Add an MCP server.\n- `/clear` - Clear chat history.\n- `/help` - Show help message.\n- `ESC` - Exit.\n\n### Keybindings\n\n- `Enter`: Send message\n- `Up/Down/PgUp/PgDn`: Scroll chat history\n- `Left/Right/Home/End`: Navigate input cursor\n- `Delete/Backspace`: Edit text\n\n### Interaction\n\n- **Sidebar**: Click on a model name to switch models.\n- **Chat**: Use Mouse Wheel to scroll history.\n\n## Configuration\n\nModels info is stored in `~/.config/query.rs/config.json`.";
-        
-        let skin = MadSkin::default();
-        let help_ansi = skin.term_text(help_text).to_string();
-        let help_tui = help_ansi.into_text().unwrap_or_default();
-        
-        let help_inner_width = chat_area.width.saturating_sub(2) as usize;
-        let wrapped_help = textwrap::wrap(help_text, help_inner_width);
-        let total_help_lines = wrapped_help.len() as u16;
-        let view_height = chat_area.height.saturating_sub(2);
-        
-        // Help scroll logic (from top)
-        let max_help_scroll = total_help_lines.saturating_sub(view_height);
-        let clamped_help_scroll = app.help_scroll.min(max_help_scroll);
-        let help_scroll_y = max_help_scroll.saturating_sub(clamped_help_scroll);
-
-        let help_para = Paragraph::new(help_tui)
-            .block(Block::default().borders(Borders::ALL).title("Help Menu"))
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .scroll((help_scroll_y, 0));
-        f.render_widget(help_para, chat_area);
-    } else {
-        let mut full_chat_raw = String::new();
-        let mut full_chat_md = String::new();
-        for m in &app.messages {
-            let prefix = if m.role == "user" { "You" } else { "AI" };
-            let content = m.content_text();
-            full_chat_raw.push_str(&format!("{}: {}\n\n", prefix, content));
-            full_chat_md.push_str(&format!("**{}**: {}\n\n", prefix, content));
-        }
-        
-        // Calculate total lines for scrolling
-        let chat_inner_width = chat_area.width.saturating_sub(2) as usize;
-        let wrapped_chat = textwrap::wrap(&full_chat_raw, chat_inner_width);
-        let total_chat_lines = wrapped_chat.len() as u16;
-        let view_height = chat_area.height.saturating_sub(2);
-        
-        // Calculate scroll from top
-        let max_scroll = total_chat_lines.saturating_sub(view_height);
-        let clamped_chat_scroll = app.chat_scroll.min(max_scroll);
-        let scroll_y = max_scroll.saturating_sub(clamped_chat_scroll);
-
-        let skin = MadSkin::default();
-        let chat_ansi = skin.term_text(&full_chat_md).to_string();
-        let chat_tui = chat_ansi.into_text().unwrap_or_default();
-
-        let message_list = Paragraph::new(chat_tui)
-            .block(Block::default().borders(Borders::ALL).title("Chat"))
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .scroll((scroll_y, 0));
-        f.render_widget(message_list, chat_area);
-    }
-
-    // Input box logic
-    let input_area = main_chunks[2];
-    let inner_width = (input_area.width as usize).saturating_sub(2);
-    
-    // We use a simpler cursor calculation to avoid tui/textwrap drift
-    let mut cursor_x = 0;
-    let mut cursor_y = 0;
-    if inner_width > 0 {
-        cursor_x = (app.cursor_pos % inner_width) as u16;
-        cursor_y = (app.cursor_pos / inner_width) as u16;
-    }
-
-    let input_scroll = cursor_y;
-
-    let input = Paragraph::new(app.input.as_str())
-        .style(Style::default().fg(Color::Yellow))
-        .block(Block::default().borders(Borders::ALL).title("Input (Type /model for help)"))
-        .wrap(ratatui::widgets::Wrap { trim: false })
-        .scroll((input_scroll, 0));
-    f.render_widget(input, input_area);
-
-    // Set cursor
-    f.set_cursor_position((
-        input_area.x + 1 + cursor_x,
-        input_area.y + 1, // Always show the current typing line at the top of the input box
-    ));
-
-    // Status bar
-    let status = Paragraph::new(app.status_message.as_str())
-        .style(Style::default().fg(Color::DarkGray));
-    f.render_widget(status, main_chunks[3]);
-}
