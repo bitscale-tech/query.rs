@@ -1,6 +1,6 @@
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use anyhow::{Result, Context};
 use std::fs;
 use std::path::PathBuf;
 
@@ -32,8 +32,6 @@ pub struct Config {
     pub current_model: Option<String>,
     #[serde(default = "default_mcp_servers")]
     pub mcp_servers: HashMap<String, McpServerConfig>,
-    #[serde(default = "default_true")]
-    pub show_sidebar: bool,
 }
 
 impl Default for Config {
@@ -42,31 +40,37 @@ impl Default for Config {
             models: HashMap::new(),
             current_model: None,
             mcp_servers: default_mcp_servers(),
-            show_sidebar: default_true(),
         }
     }
 }
 
-fn default_true() -> bool { true }
-
 fn default_mcp_servers() -> HashMap<String, McpServerConfig> {
     let mut m = HashMap::new();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    
-    m.insert("filesystem".to_string(), McpServerConfig {
-        command: "npx".to_string(),
-        args: vec![
-            "-y".to_string(), 
-            "@modelcontextprotocol/server-filesystem".to_string(), 
-            cwd.display().to_string()
-        ],
-        env: HashMap::new(),
-    });
-    m.insert("everything".to_string(), McpServerConfig {
-        command: "npx".to_string(),
-        args: vec!["-y".to_string(), "@modelcontextprotocol/server-everything".to_string()],
-        env: HashMap::new(),
-    });
+
+    m.insert(
+        "filesystem".to_string(),
+        McpServerConfig {
+            command: "npx".to_string(),
+            args: vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-filesystem".to_string(),
+                cwd.display().to_string(),
+            ],
+            env: HashMap::new(),
+        },
+    );
+    m.insert(
+        "everything".to_string(),
+        McpServerConfig {
+            command: "npx".to_string(),
+            args: vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-everything".to_string(),
+            ],
+            env: HashMap::new(),
+        },
+    );
     m
 }
 
@@ -99,19 +103,28 @@ impl Config {
         Ok(path)
     }
 
-    pub fn add_model(&mut self, provider: Provider, name: String, api_key: String, base_url: Option<String>) {
+    pub fn add_model(
+        &mut self,
+        provider: Provider,
+        name: String,
+        api_key: String,
+        base_url: Option<String>,
+    ) {
         let base_url = base_url.unwrap_or_else(|| match provider {
             Provider::Gemini => "https://generativelanguage.googleapis.com".to_string(),
             Provider::OpenAICompat => "https://api.openai.com/v1".to_string(),
             Provider::Anthropic => "https://api.anthropic.com".to_string(),
         });
 
-        self.models.insert(name.clone(), ModelConfig {
-            name: name.clone(),
-            api_key,
-            base_url,
-            provider,
-        });
+        self.models.insert(
+            name.clone(),
+            ModelConfig {
+                name: name.clone(),
+                api_key,
+                base_url,
+                provider,
+            },
+        );
         if self.current_model.is_none() {
             self.current_model = Some(name);
         }

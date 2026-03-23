@@ -1,13 +1,13 @@
-use rmcp::service::{RoleClient, serve_client, RunningService, Peer};
-use rmcp::transport::child_process::TokioChildProcess;
-use rmcp::model::{Tool, CallToolResult, CallToolRequestParams};
 use crate::config::McpServerConfig;
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
+use rmcp::model::{CallToolRequestParams, CallToolResult, Tool};
+use rmcp::service::{Peer, RoleClient, RunningService, serve_client};
+use rmcp::transport::child_process::TokioChildProcess;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tokio::process::Command;
-use std::borrow::Cow;
+use tokio::sync::Mutex;
 
 use std::process::Stdio;
 
@@ -34,13 +34,20 @@ impl McpManager {
         for (k, v) in &config.env {
             cmd.env(k, v);
         }
-        cmd.stderr(Stdio::null());
-        
-        let transport = TokioChildProcess::new(cmd).context("Failed to spawn MCP server")?;
-        let running_service: McpClientHandle = serve_client((), transport).await
+        cmd.stderr(Stdio::null()); // belt-and-suspenders, overridden by builder below
+
+        let (transport, _) = TokioChildProcess::builder(cmd)
+            .stderr(Stdio::null())
+            .spawn()
+            .context("Failed to spawn MCP server")?;
+        let running_service: McpClientHandle = serve_client((), transport)
+            .await
             .map_err(|e| anyhow::anyhow!("MCP Init Error: {:?}", e))?;
-        
-        self.clients.lock().await.insert(name.to_string(), running_service);
+
+        self.clients
+            .lock()
+            .await
+            .insert(name.to_string(), running_service);
         // Refresh cache after adding
         let _ = self.list_tools().await;
         Ok(())
@@ -49,49 +56,72 @@ impl McpManager {
     pub async fn list_tools(&self) -> Result<Vec<Tool>> {
         let mut all_tools = Vec::new();
         let mut new_cache = HashMap::new();
-        
+
         // Get peers while holding lock for a short time
         let peers: Vec<(String, Peer<RoleClient>)> = {
             let clients = self.clients.lock().await;
-            clients.iter().map(|(n, c)| (n.clone(), c.peer().clone())).collect()
+            clients
+                .iter()
+                .map(|(n, c)| (n.clone(), c.peer().clone()))
+                .collect()
         };
-        
+
         for (server_name, peer) in peers {
-            let tools = peer.list_all_tools().await
-                .map_err(|e| anyhow::anyhow!("MCP ListTools Error from {}: {:?}", server_name, e))?;
-            
+            let tools = peer.list_all_tools().await.map_err(|e| {
+                anyhow::anyhow!("MCP ListTools Error from {}: {:?}", server_name, e)
+            })?;
+
             for mut tool in tools {
                 let original_name = tool.name.to_string();
                 let namespaced_name = format!("{}:{}", server_name, original_name);
-                
+
                 tool.name = Cow::Owned(namespaced_name.clone());
                 new_cache.insert(namespaced_name, server_name.clone());
                 all_tools.push(tool);
             }
         }
-        
+
         *self.tool_cache.lock().await = new_cache;
         Ok(all_tools)
     }
 
-    pub async fn call_tool(&self, namespaced_name: &str, arguments: serde_json::Value) -> Result<CallToolResult> {
-        let server_name = self.tool_cache.lock().await.get(namespaced_name).cloned()
+    pub async fn call_tool(
+        &self,
+        namespaced_name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<CallToolResult> {
+        let server_name = self
+            .tool_cache
+            .lock()
+            .await
+            .get(namespaced_name)
+            .cloned()
             .context(format!("Tool {} not found in cache", namespaced_name))?;
-            
+
         let peer = {
             let clients = self.clients.lock().await;
-            clients.get(&server_name).map(|c| c.peer().clone())
-                .context(format!("Server {} not found for tool {}", server_name, namespaced_name))?
+            clients
+                .get(&server_name)
+                .map(|c| c.peer().clone())
+                .context(format!(
+                    "Server {} not found for tool {}",
+                    server_name, namespaced_name
+                ))?
         };
-        
-        let actual_name = namespaced_name.splitn(2, ':').nth(1).unwrap_or(namespaced_name);
-        
+
+        let actual_name = namespaced_name
+            .splitn(2, ':')
+            .nth(1)
+            .unwrap_or(namespaced_name);
+
         let mut params = CallToolRequestParams::new(Cow::Owned(actual_name.to_string()));
         if let serde_json::Value::Object(map) = arguments {
             params.arguments = Some(map);
         }
-        
-        peer.call_tool(params).await.map_err(|e| anyhow::anyhow!("MCP CallTool Error: {:?}", e))
+
+        peer.call_tool(params)
+            .await
+            .map_err(|e| anyhow::anyhow!("MCP CallTool Error: {:?}", e))
     }
 
     pub async fn shutdown(&self) {
